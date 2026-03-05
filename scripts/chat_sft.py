@@ -442,6 +442,7 @@ while True:
         group["lr"] = group["initial_lr"] * lrm
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
+
     optimizer.step()
     model.zero_grad(set_to_none=True)
     synchronize()

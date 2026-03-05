@@ -37,6 +37,7 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (half context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    rho_momentum: float = 0.9 # momentum for the alpha moving average in Affine-Scaled Attention
 
 
 def norm(x):
@@ -118,6 +119,109 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
+class AffineScaledCausalSelfAttention(nn.Module):
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.n_head = config.n_head
+        self.n_kv_head = config.n_kv_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
+        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.ve_gate_channels = 32
+        self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        # Affine Scaled Attention addditions
+        self.alpha_proj = nn.Linear(self.n_embd, self.n_head, bias=False)
+        self.register_buffer("alpha_ma", torch.full((self.n_head,), 0.5))
+        self.rho = config.rho_momentum
+
+    def linear_clipping(self, x):
+        return torch.clamp(0.1 * x + 0.5, min=0, max=1)
+
+    def forward(self, x, ve, cos_sin, window_size, kv_cache):
+        B, T, C = x.size()
+
+        # Project the input to get queries, keys, and values
+        # Shape: (B, T, H, D) - FA3's native layout, no transpose needed!
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+
+        # Value residual (ResFormer): mix in value embedding with input-dependent gate per head
+        if ve is not None:
+            ve = ve.view(B, T, self.n_kv_head, self.head_dim)
+            gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))  # (B, T, n_kv_head), range (0, 2)
+            v = v + gate.unsqueeze(-1) * ve
+
+        # Apply Rotary Embeddings to queries and keys to get relative positional encoding
+        cos, sin = cos_sin
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+        q, k = norm(q), norm(k) # QK norm
+
+        # Flash Attention (FA3 on Hopper+, PyTorch SDPA fallback elsewhere)
+        # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context
+        if kv_cache is None:
+            # Training: causal attention with optional sliding window
+            y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            # Inference: use flash_attn_with_kvcache which handles cache management
+            k_cache, v_cache = kv_cache.get_layer_cache(self.layer_idx)
+            y = flash_attn.flash_attn_with_kvcache(
+                q, k_cache, v_cache,
+                k=k, v=v,
+                cache_seqlens=kv_cache.cache_seqlens,
+                causal=True,
+                window_size=window_size,
+            )
+            # Advance position after last layer processes
+            if self.layer_idx == kv_cache.n_layers - 1:
+                kv_cache.advance(T)
+
+        # Apply Affine-Scaled Attention transformations
+        v_context_sum = torch.cumsum(v, dim=1)
+        seq_len = v_context_sum.size(1)
+        q_idx = torch.arange(1, seq_len + 1, device=x.device)
+        if window_size is not None and window_size[0] != -1:
+            W = window_size[0]
+            if seq_len > W:
+                shifted_sum = torch.zeros_like(v_context_sum)
+                shifted_sum[:, W:] = v_context_sum[:, :-W]
+                v_context_sum -= shifted_sum
+            N = torch.clamp(q_idx, max=W).view(1, T, 1, 1)
+        else:
+            N = q_idx.view(1, seq_len, 1, 1)
+
+        alpha = self.linear_clipping(self.alpha_proj(x))
+        alpha_expanded = alpha.unsqueeze(-1)
+
+        # Update alpha_ma (alpha moving average)
+        if self.training:
+            local_alpha_mean = alpha.mean(dim=(0, 1))
+            if torch.distributed.is_initialized():
+                # synchronize across all GPUs
+                torch.distributed.all_reduce(local_alpha_mean, op=torch.distributed.ReduceOp.SUM)
+                global_alpha_mean = local_alpha_mean / torch.distributed.get_world_size()
+            else:
+                global_alpha_mean = local_alpha_mean
+
+            with torch.no_grad():
+                self.alpha_ma.mul_(self.rho).add_((1 - self.rho) * global_alpha_mean)
+
+        alpha_ma = self.alpha_ma.view(1, 1, self.n_head, 1)
+        beta = (alpha_ma - alpha_expanded) / N
+        y = alpha_expanded * y + beta * v_context_sum
+
+        # Re-assemble the heads and project back to residual stream
+        y = y.contiguous().view(B, T, -1)
+        y = self.c_proj(y)
+        return y
+
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -134,7 +238,7 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.attn = AffineScaledCausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
@@ -197,6 +301,7 @@ class GPT(nn.Module):
             attn.c_k:        uniform, std=1/sqrt(n_embd)
             attn.c_v:        uniform, std=1/sqrt(n_embd)
             attn.c_proj:     zeros
+            attn.alpha_proj: zeros
             mlp.c_fc:        uniform, std=1/sqrt(n_embd)
             mlp.c_proj:      zeros
         """
@@ -213,6 +318,7 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
+            torch.nn.init.zeros_(block.attn.alpha_proj.weight)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
