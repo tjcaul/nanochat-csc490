@@ -413,6 +413,8 @@ while True:
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,
                     "window_pattern": model.config.window_pattern,
+                    "affine": model.config.affine,
+                    "rho_momentum": model.config.rho_momentum,
                 },
                 "user_config": user_config, # inputs to the training script
             },
