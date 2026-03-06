@@ -53,6 +53,7 @@ parser.add_argument("--max-seq-len", type=int, default=2048, help="max context l
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
 parser.add_argument("--affine", action="store_true", help="enable Affine-Scaled Attention")
 parser.add_argument("--rho", type=float, default=0.9, help="momentum for Affine-Scaled Attention")
+parser.add_argument("--nope", action="store_false", help="disable rotary position embeddings")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -135,6 +136,7 @@ def build_model_meta(depth):
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern, affine=args.affine, rho_momentum=args.rho,
+        use_rotary=args.nope,
     )
     with torch.device("meta"):
         model_meta = GPT(config)

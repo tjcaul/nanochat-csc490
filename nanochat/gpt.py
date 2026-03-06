@@ -39,6 +39,7 @@ class GPTConfig:
     window_pattern: str = "SSSL"
     affine: bool = False # use Affine-Scaled Attention
     rho_momentum: float = 0.9 # momentum for the alpha moving average in Affine-Scaled Attention
+    use_rotary: bool = True # use rotary embeddings
 
 
 def norm(x):
@@ -84,6 +85,7 @@ class CausalSelfAttention(nn.Module):
             self.alpha_proj = None
             self.alpha_ma = None
             self.rho = None
+        self.use_rotary = config.use_rotary
 
     def linear_clipping(self, x):
         return torch.clamp(0.1 * x + 0.5, min=0, max=1)
@@ -104,9 +106,10 @@ class CausalSelfAttention(nn.Module):
             v = v + gate.unsqueeze(-1) * ve
 
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
-        cos, sin = cos_sin
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        q, k = norm(q), norm(k) # QK norm
+        if self.use_rotary:
+            cos, sin = cos_sin
+            q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+            q, k = norm(q), norm(k) # QK norm
 
         # Flash Attention (FA3 on Hopper+, PyTorch SDPA fallback elsewhere)
         # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context

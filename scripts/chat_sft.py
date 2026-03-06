@@ -415,6 +415,7 @@ while True:
                     "window_pattern": model.config.window_pattern,
                     "affine": model.config.affine,
                     "rho_momentum": model.config.rho_momentum,
+                    "use_rotary": model.config.use_rotary,
                 },
                 "user_config": user_config, # inputs to the training script
             },
