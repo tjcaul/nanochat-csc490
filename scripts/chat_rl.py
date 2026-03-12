@@ -20,6 +20,7 @@ import argparse
 import os
 import itertools
 import wandb
+import re
 import torch
 import torch.distributed as dist
 from contextlib import nullcontext
@@ -87,6 +88,85 @@ val_task = GSM8K(subset="main", split="test")
 num_steps = (len(train_task) // args.examples_per_step) * args.num_epochs
 print0(f"Calculated number of steps: {num_steps}")
 
+def extract_final_answer(text):
+    text_low = text.lower()
+    patterns = [
+        r"final answer[:\s]*\$?(-?\d+(?:\.\d+)?)",
+        r"answer[:\s]*\$?(-?\d+(?:\.\d+)?)",
+        r"the answer is[:\s]*\$?(-?\d+(?:\.\d+)?)",
+        r"\\boxed\{(-?\d+(?:\.\d+)?)\}",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, text_low)
+        if m:
+            return float(m.group(1)), True
+
+    nums = re.findall(r"-?\d+(?:\.\d+)?", text)
+    if nums:
+        return float(nums[-1]), False
+
+    return None, False
+
+def extract_equations(text: str):
+    matches = re.findall(
+        r"(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*=\s*(-?\d+(?:\.\d+)?)",
+        text
+    )
+    return [(float(a), op, float(b), float(c)) for a, op, b, c in matches]
+
+def eval_equation(a: float, op: str, b: float):
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    if op == "/":
+        if abs(b) < 1e-12:
+            return None
+        return a / b
+    return None
+
+def reasoning_consistency_reward(output_text: str):
+    reward = 0.0
+
+    final_answer, confident = extract_final_answer(output_text)
+    if final_answer is None:
+        return 0.0
+
+    if confident:
+        reward += 0.05
+
+    eqs = extract_equations(output_text)
+    if not eqs:
+        return reward
+
+    valid_count = 0
+    invalid_count = 0
+    supports_final = False
+
+    for a, op, b, c in eqs:
+        calc = eval_equation(a, op, b)
+        if calc is None:
+            continue
+
+        if abs(calc - c) < 1e-6:
+            valid_count += 1
+            if abs(c - final_answer) < 1e-6:
+                supports_final = True
+        else:
+            invalid_count += 1
+
+    if valid_count > 0:
+        reward += 0.10
+    if supports_final:
+        reward += 0.15
+    if invalid_count > 0:
+        reward -= 0.10
+
+    return reward
+
 @torch.no_grad()
 def get_batch():
     assistant_end = tokenizer.encode_special("<|assistant_end|>") # ok to use this token, it's only for padding and isn't used in the loss.
@@ -128,6 +208,9 @@ def get_batch():
             # Decode the generated response
             generated_text = tokenizer.decode(generated_tokens)
             # Calculate the reward
+            # base_reward = train_task.reward(conversation, generated_text)
+            # consis_reward = reasoning_consistency_reward(generated_text)
+            # reward = base_reward + 0.2 * consis_reward
             reward = train_task.reward(conversation, generated_text)
             rewards.append(reward)
 
