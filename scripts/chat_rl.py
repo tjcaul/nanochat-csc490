@@ -18,6 +18,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
 
 import argparse
 import os
+import re
 import itertools
 import wandb
 import torch
@@ -28,6 +29,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir,
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
+from tasks.gsm8k import UNITS
 
 # -----------------------------------------------------------------------------
 # CLI arguments
@@ -56,6 +58,7 @@ parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learnin
 parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
 parser.add_argument("--weight-decay", type=float, default=0.0, help="weight decay for embedding/unembedding parameters (Adam)")
 parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR as fraction of base LR")
+parser.add_argument("--units-weight", type=float, default=0.0, help="multiplier for reward of using correct units")
 # Evaluation / checkpointing
 parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k every N steps")
 parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
@@ -87,8 +90,53 @@ val_task = GSM8K(subset="main", split="test")
 num_steps = (len(train_task) // args.examples_per_step) * args.num_epochs
 print0(f"Calculated number of steps: {num_steps}")
 
+def extract_units(response: str) -> set:
+    """
+    Return the set of unit strings used in the response,
+    normalized to lowercase and singular for comparison.
+    """
+    units = set()
+    # Remove numbers so we can find "mm" in "45mm" and "$" in "$20"
+    response = re.sub(r'[0-9.,]', '', response)
+    tokens = response.lower().split(' ')
+    max_n = max(len(k.split(' ')) for k in UNITS)
+    for n in range(max_n, 0, -1):
+        n_grams = [' '.join(tokens[i:i+n]) for i in range(len(tokens) - n + 1)]
+        for n_gram in n_grams:
+            if n_gram in UNITS:
+                units.add(UNITS[n_gram])
+    return units
+
+def calculate_units_reward(conversation, assistant_response) -> float:
+    """
+    Compute a penalty (negative reward) for the use of incorrect units, or for missing units, in the model's answer,
+    where units are e.g. "pound", "kilogram", "meter", "day".
+    The penalty is the fraction of unit words that were used in the ground truth answer which
+    the model failed to use. Also, if the model uses any incorrect units, the reward is -1.0, to
+    discourage guessing / spraying unit words.
+    If the ground truth answer uses no units, the penalty is 0.
+    """
+    assert isinstance(assistant_response, str), "Assuming simple string response for now"
+    # First extract the ground truth answer
+    assistant_message = conversation['messages'][-1]
+    assert assistant_message['role'] == "assistant", "Last message must be from the Assistant"
+    assert isinstance(assistant_message['content'], list), "This is expected to be a list of parts"
+    last_text_part = assistant_message['content'][-1]['text'] # this contains the final answer in GSM8K
+    # Extract both the ground truth answer and the predicted answer
+    ref_units = extract_units(last_text_part)
+    pred_units = extract_units(assistant_response)
+    num_total_units = len(ref_units)
+    if num_total_units == 0:
+        return 0.0
+    # Check if response used incorrect unit
+    if len(set(pred_units) - set(ref_units)) > 0:
+        return -1.0
+    # Compute fraction of missing units
+    num_missing_units = len(set(ref_units) - set(pred_units))
+    return -num_missing_units / num_total_units
+
 @torch.no_grad()
-def get_batch():
+def get_batch(units_weight: float = 0):
     assistant_end = tokenizer.encode_special("<|assistant_end|>") # ok to use this token, it's only for padding and isn't used in the loss.
     rank_indices = range(ddp_rank, len(train_task), ddp_world_size) # each rank is responsible for different examples in the training data
     for example_idx in itertools.cycle(rank_indices):
@@ -127,9 +175,13 @@ def get_batch():
             generated_tokens = sample_tokens[prefix_length:]
             # Decode the generated response
             generated_text = tokenizer.decode(generated_tokens)
-            # Calculate the reward
-            reward = train_task.reward(conversation, generated_text)
-            rewards.append(reward)
+            # Calculate the base reward
+            base_reward = train_task.reward(conversation, generated_text)
+            # Calculate the reward for using correct units
+            units_reward = calculate_units_reward(conversation, generated_text)
+            units_reward *= units_weight
+
+            rewards.append(base_reward)
 
         # Pad the sequences so that their lengths (in time) match
         max_length = max(len(seq) for seq in generated_token_sequences)
@@ -224,7 +276,7 @@ examples_per_rank = args.examples_per_step // ddp_world_size # per GPU
 print0(f"Calculated examples per rank: {examples_per_rank}")
 
 # Kick off the training loop
-batch_iterator = get_batch()
+batch_iterator = get_batch(args.units_reward)
 for step in range(num_steps):
 
     # Evaluate the model once in a while and log to wandb

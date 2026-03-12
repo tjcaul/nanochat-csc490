@@ -115,3 +115,180 @@ class GSM8K(Task):
         is_correct = self.evaluate(conversation, assistant_response)
         is_correct_float = float(is_correct)
         return is_correct_float
+
+UNITS = {
+    # Time
+    "s": "second",
+    "sec": "second",
+    "secs": "second",
+    "second": "second",
+    "seconds": "second",
+
+    "min": "minute",
+    "mins": "minute",
+    "minute": "minute",
+    "minutes": "minute",
+
+    "h": "hour",
+    "hr": "hour",
+    "hrs": "hour",
+    "hour": "hour",
+    "hours": "hour",
+
+    "d": "day",
+    "day": "day",
+    "days": "day",
+
+    "wk": "week",
+    "wks": "week",
+    "week": "week",
+    "weeks": "week",
+
+    "mo": "month",
+    "mos": "month",
+    "month": "month",
+    "months": "month",
+
+    "yr": "year",
+    "yrs": "year",
+    "year": "year",
+    "years": "year",
+
+    # Length
+    "mm": "millimetre",
+    "millimeter": "millimetre",
+    "millimeters": "millimetre",
+    "millimetre": "millimetre",
+    "millimetres": "millimetre",
+
+    "cm": "centimetre",
+    "centimeter": "centimetre",
+    "centimeters": "centimetre",
+    "centimetre": "centimetre",
+    "centimetres": "centimetre",
+
+    "meter": "metre",
+    "meters": "metre",
+    "metre": "metre",
+    "metres": "metre",
+
+    "km": "kilometre",
+    "kilometer": "kilometre",
+    "kilometers": "kilometre",
+    "kilometre": "kilometre",
+    "kilometres": "kilometre",
+
+    "in": "inch",
+    "inch": "inch",
+    "inches": "inch",
+
+    "ft": "foot",
+    "foot": "foot",
+    "feet": "foot",
+
+    "yd": "yard",
+    "yard": "yard",
+    "yards": "yard",
+
+    "mi": "mile",
+    "mile": "mile",
+    "miles": "mile",
+
+    # Mass
+    "mg": "milligram",
+    "milligram": "milligram",
+    "milligrams": "milligram",
+    "milligramme": "milligram",
+    "milligrammes": "milligram",
+
+    "g": "gram",
+    "gram": "gram",
+    "grams": "gram",
+    "gramme": "gram",
+    "grammes": "gram",
+
+    "kg": "kilogram",
+    "kilogram": "kilogram",
+    "kilograms": "kilogram",
+    "kilogramme": "kilogram",
+    "kilogrammes": "kilogram",
+
+    "oz": "ounce",
+    "ounce": "ounce",
+    "ounces": "ounce",
+
+    "lb": "pound",
+    "lbs": "pound",
+    "pound": "pound",
+    "pounds": "pound",
+
+    "ton": "tonne",
+    "tons": "tonne",
+    "tonne": "tonne",
+    "tonnes": "tonne",
+
+    # Volume
+    "ml": "millilitre",
+    "milliliter": "millilitre",
+    "milliliters": "millilitre",
+    "millilitre": "millilitre",
+    "millilitres": "millilitre",
+
+    "l": "litre",
+    "L": "litre",
+    "liter": "litre",
+    "liters": "litre",
+    "litre": "litre",
+    "litres": "litre",
+
+    "cup": "cup",
+    "cups": "cup",
+
+    "pt": "pint",
+    "pint": "pint",
+    "pints": "pint",
+
+    "qt": "quart",
+    "quart": "quart",
+    "quarts": "quart",
+
+    "gal": "gallon",
+    "gallon": "gallon",
+    "gallons": "gallon",
+
+    # Temperature
+    # Note we parse all as "degree", including the angular degree, because
+    # we can't reliably differentiate.
+    "degree": "degree",
+    "degrees": "degree",
+    "celsius": "degree",
+    "f": "degree",
+    "°f": "degree",
+    "fahrenheit": "degree",
+
+    # Speed
+    "m/s": "metre per second",
+    "meter per second": "metre per second",
+    "meters per second": "metre per second",
+    "metre per second": "metre per second",
+    "metres per second": "metre per second",
+
+    "km/h": "kilometre per hour",
+    "kph": "kilometre per hour",
+    "kilometer per hour": "kilometre per hour",
+    "kilometers per hour": "kilometre per hour",
+    "kilometre per hour": "kilometre per hour",
+    "kilometres per hour": "kilometre per hour",
+
+    "mph": "mile per hour",
+    "mile per hour": "mile per hour",
+    "miles per hour": "mile per hour",
+
+    # Money
+    "$": "dollar",
+    "dollar": "dollar",
+    "dollars": "dollar",
+
+    "cent": "cent",
+    "cents": "cent",
+}
