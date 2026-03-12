@@ -86,6 +86,13 @@ engine = Engine(model, tokenizer) # for sampling rollouts
 # -----------------------------------------------------------------------------
 # Rollout / sampling generator loop that yields batches of examples for training
 
+print0("Rewards enabled:")
+print0("- base (x1.00): reward for correct answers")
+if args.units_weight > 0.0:
+    print0(f"- units (x{args.units_weight:.2f}): penalty for incorrect units")
+if args.consis_weight > 0.0:
+    print0(f"- consis (x{args.consis_weight:.2f}): reward for consistent reasoning")
+
 train_task = GSM8K(subset="main", split="train")
 val_task = GSM8K(subset="main", split="test")
 num_steps = (len(train_task) // args.examples_per_step) * args.num_epochs
@@ -260,11 +267,17 @@ def get_batch(units_weight: float = 0, consis_weight: float = 0):
             base_reward = train_task.reward(conversation, generated_text)
 
             # Calculate the reward for using correct units
-            units_reward = calculate_units_reward(conversation, generated_text)
-            units_reward *= units_weight
+            if units_weight > 0.0:
+                units_reward = calculate_units_reward(conversation, generated_text)
+                units_reward *= units_weight
+            else:
+                units_reward = 0.0
 
-            consis_reward = reasoning_consistency_reward(generated_text)
-            consis_reward *= consis_weight
+            if consis_weight > 0.0:
+                consis_reward = reasoning_consistency_reward(generated_text)
+                consis_reward *= consis_weight
+            else:
+                consis_reward = 0.0
 
             # Calculate the reward
             rewards.append(base_reward + units_reward + consis_reward)
