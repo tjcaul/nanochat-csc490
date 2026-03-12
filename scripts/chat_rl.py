@@ -58,7 +58,8 @@ parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learnin
 parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
 parser.add_argument("--weight-decay", type=float, default=0.0, help="weight decay for embedding/unembedding parameters (Adam)")
 parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR as fraction of base LR")
-parser.add_argument("--units-weight", type=float, default=0.0, help="multiplier for reward of using correct units")
+parser.add_argument("--units-weight", type=float, default=0.0, help="multiplier for reward for using correct units")
+parser.add_argument("--consis-weight", type=float, default=0.0, help="multiplier for reward for consisent reasoning")
 # Evaluation / checkpointing
 parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k every N steps")
 parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
@@ -135,8 +136,87 @@ def calculate_units_reward(conversation, assistant_response) -> float:
     num_missing_units = len(set(ref_units) - set(pred_units))
     return -num_missing_units / num_total_units
 
+def extract_final_answer(text):
+    text_low = text.lower()
+    patterns = [
+        r"final answer[:\s]*\$?(-?\d+(?:\.\d+)?)",
+        r"answer[:\s]*\$?(-?\d+(?:\.\d+)?)",
+        r"the answer is[:\s]*\$?(-?\d+(?:\.\d+)?)",
+        r"\\boxed\{(-?\d+(?:\.\d+)?)\}",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, text_low)
+        if m:
+            return float(m.group(1)), True
+
+    nums = re.findall(r"-?\d+(?:\.\d+)?", text)
+    if nums:
+        return float(nums[-1]), False
+
+    return None, False
+
+def extract_equations(text: str):
+    matches = re.findall(
+        r"(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*=\s*(-?\d+(?:\.\d+)?)",
+        text
+    )
+    return [(float(a), op, float(b), float(c)) for a, op, b, c in matches]
+
+def eval_equation(a: float, op: str, b: float):
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    if op == "/":
+        if abs(b) < 1e-12:
+            return None
+        return a / b
+    return None
+
+def reasoning_consistency_reward(output_text: str):
+    reward = 0.0
+
+    final_answer, confident = extract_final_answer(output_text)
+    if final_answer is None:
+        return 0.0
+
+    if confident:
+        reward += 0.05
+
+    eqs = extract_equations(output_text)
+    if not eqs:
+        return reward
+
+    valid_count = 0
+    invalid_count = 0
+    supports_final = False
+
+    for a, op, b, c in eqs:
+        calc = eval_equation(a, op, b)
+        if calc is None:
+            continue
+
+        if abs(calc - c) < 1e-6:
+            valid_count += 1
+            if abs(c - final_answer) < 1e-6:
+                supports_final = True
+        else:
+            invalid_count += 1
+
+    if valid_count > 0:
+        reward += 0.10
+    if supports_final:
+        reward += 0.15
+    if invalid_count > 0:
+        reward -= 0.10
+
+    return reward
+
 @torch.no_grad()
-def get_batch(units_weight: float = 0):
+def get_batch(units_weight: float = 0, consis_weight: float = 0):
     assistant_end = tokenizer.encode_special("<|assistant_end|>") # ok to use this token, it's only for padding and isn't used in the loss.
     rank_indices = range(ddp_rank, len(train_task), ddp_world_size) # each rank is responsible for different examples in the training data
     for example_idx in itertools.cycle(rank_indices):
@@ -175,13 +255,19 @@ def get_batch(units_weight: float = 0):
             generated_tokens = sample_tokens[prefix_length:]
             # Decode the generated response
             generated_text = tokenizer.decode(generated_tokens)
+
             # Calculate the base reward
             base_reward = train_task.reward(conversation, generated_text)
+
             # Calculate the reward for using correct units
             units_reward = calculate_units_reward(conversation, generated_text)
             units_reward *= units_weight
 
-            rewards.append(base_reward)
+            consis_reward = reasoning_consistency_reward(generated_text)
+            consis_reward *= consis_weight
+
+            # Calculate the reward
+            rewards.append(base_reward + units_reward + consis_reward)
 
         # Pad the sequences so that their lengths (in time) match
         max_length = max(len(seq) for seq in generated_token_sequences)
@@ -276,7 +362,7 @@ examples_per_rank = args.examples_per_step // ddp_world_size # per GPU
 print0(f"Calculated examples per rank: {examples_per_rank}")
 
 # Kick off the training loop
-batch_iterator = get_batch(args.units_reward)
+batch_iterator = get_batch(args.units_weight, args.consis_weight)
 for step in range(num_steps):
 
     # Evaluate the model once in a while and log to wandb
