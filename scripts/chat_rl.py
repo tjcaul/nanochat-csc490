@@ -151,7 +151,7 @@ def extract_python_output(output_text):
 
     return outputs
 
-def reasoning_consistency_reward(output_text: str):
+def arithmetic_consistency_reward(output_text: str):
     outputs = extract_python_output(output_text)
     answer = extract_answer(output_text)
 
@@ -226,7 +226,7 @@ def get_batch(units_weight: float = 0, consis_weight: float = 0):
                 units_reward = 0.0
 
             if consis_weight > 0.0:
-                consis_reward = reasoning_consistency_reward(generated_text)
+                consis_reward = arithmetic_consistency_reward(generated_text)
                 consis_reward *= consis_weight
             else:
                 consis_reward = 0.0
