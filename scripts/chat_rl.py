@@ -28,7 +28,7 @@ from contextlib import nullcontext
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb, autodetect_device_type
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
-from tasks.gsm8k import GSM8K
+from tasks.gsm8k import GSM8K, extract_answer
 from tasks.gsm8k import UNITS
 
 # -----------------------------------------------------------------------------
@@ -143,84 +143,36 @@ def calculate_units_reward(conversation, assistant_response) -> float:
     num_missing_units = len(set(ref_units) - set(pred_units))
     return -num_missing_units / num_total_units
 
-def extract_final_answer(text):
-    text_low = text.lower()
-    patterns = [
-        r"final answer[:\s]*\$?(-?\d+(?:\.\d+)?)",
-        r"answer[:\s]*\$?(-?\d+(?:\.\d+)?)",
-        r"the answer is[:\s]*\$?(-?\d+(?:\.\d+)?)",
-        r"\\boxed\{(-?\d+(?:\.\d+)?)\}",
-    ]
+def extract_python_output(output_text):
+    outputs = []
 
-    for pat in patterns:
-        m = re.search(pat, text_low)
-        if m:
-            return float(m.group(1)), True
+    for match in re.finditer(r"<\|output_start\|>(.*?)<\|output_end\|>", output_text, re.DOTALL):
+        outputs.append(match.group(1).strip())
 
-    nums = re.findall(r"-?\d+(?:\.\d+)?", text)
-    if nums:
-        return float(nums[-1]), False
-
-    return None, False
-
-def extract_equations(text: str):
-    matches = re.findall(
-        r"(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*=\s*(-?\d+(?:\.\d+)?)",
-        text
-    )
-    return [(float(a), op, float(b), float(c)) for a, op, b, c in matches]
-
-def eval_equation(a: float, op: str, b: float):
-    if op == "+":
-        return a + b
-    if op == "-":
-        return a - b
-    if op == "*":
-        return a * b
-    if op == "/":
-        if abs(b) < 1e-12:
-            return None
-        return a / b
-    return None
+    return outputs
 
 def reasoning_consistency_reward(output_text: str):
-    reward = 0.0
+    outputs = extract_python_output(output_text)
+    answer = extract_answer(output_text)
 
-    final_answer, confident = extract_final_answer(output_text)
-    if final_answer is None:
+    if answer is None or not outputs:
+        return -1.0
+
+    try:
+        answer_val = float(answer)
+        for out in outputs:
+            try:
+                if float(out.replace(",", "")) == answer_val:
+                    return 0.0
+            except ValueError:
+                continue
+    except ValueError:
+        pass 
+
+    if answer in outputs:
         return 0.0
 
-    if confident:
-        reward += 0.05
-
-    eqs = extract_equations(output_text)
-    if not eqs:
-        return reward
-
-    valid_count = 0
-    invalid_count = 0
-    supports_final = False
-
-    for a, op, b, c in eqs:
-        calc = eval_equation(a, op, b)
-        if calc is None:
-            continue
-
-        if abs(calc - c) < 1e-6:
-            valid_count += 1
-            if abs(c - final_answer) < 1e-6:
-                supports_final = True
-        else:
-            invalid_count += 1
-
-    if valid_count > 0:
-        reward += 0.10
-    if supports_final:
-        reward += 0.15
-    if invalid_count > 0:
-        reward -= 0.10
-
-    return reward
+    return -1.0
 
 @torch.no_grad()
 def get_batch(units_weight: float = 0, consis_weight: float = 0):
