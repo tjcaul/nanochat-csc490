@@ -20,6 +20,9 @@ from tasks.common import Task
 
 
 GSM_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+TOOL_CALL_RE = re.compile(r"(<<[^>]+>>)")
+
+
 def extract_answer(completion):
     """
     Extract the numerical answer after #### marker.
@@ -36,11 +39,63 @@ def extract_answer(completion):
 
 class GSM8K(Task):
 
-    def __init__(self, subset, split, **kwargs):
+    def __init__(
+        self,
+        subset,
+        split,
+        dataset_name="openai/gsm8k",
+        dataset_config=None,
+        type_filter=None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        assert subset in ["main", "socratic"], "GSM8K subset must be main|socratic"
-        assert split in ["train", "test"], "GSM8K split must be train|test"
-        self.ds = load_dataset("openai/gsm8k", subset, split=split).shuffle(seed=42)
+        self.dataset_name = dataset_name
+        if dataset_name == "openai/gsm8k":
+            assert subset in ["main", "socratic"], "GSM8K subset must be main|socratic"
+            assert split in ["train", "test"], "GSM8K split must be train|test"
+            self.ds = load_dataset(dataset_name, subset, split=split)
+        elif dataset_name == "meta-math/MetaMathQA":
+            if dataset_config is None:
+                dataset_config = "default"
+            assert split == "train", "MetaMathQA split must be train"
+            self.ds = load_dataset(dataset_name, dataset_config, split=split)
+            if type_filter:
+                allowed_types = {t.strip() for t in type_filter if t.strip()}
+                self.ds = self.ds.filter(lambda row: row["type"] in allowed_types)
+                assert len(self.ds) > 0, "MetaMathQA filter returned 0 rows"
+        elif dataset_name == "nvidia/OpenMathInstruct-2":
+            # OpenMathInstruct-2 provides multiple named splits (e.g. train_1M, train_2M, train_5M, train).
+            # We pass the desired split name via `split`.
+            self.ds = load_dataset(dataset_name, split=split)
+            # Filter down to the augmented GSM8K-derived problems for this use-case.
+            self.ds = self.ds.filter(lambda row: row.get("problem_source") == "augmented_gsm8k")
+            assert len(self.ds) > 0, "OpenMathInstruct-2 filter returned 0 rows"
+        else:
+            raise ValueError(f"Unsupported dataset_name: {dataset_name}")
+        self.ds = self.ds.shuffle(seed=42)
+
+    def _answer_to_parts(self, answer):
+        """Convert assistant answer text into content parts with optional tool calls."""
+        assistant_message_parts = []
+        parts = re.split(TOOL_CALL_RE, answer)
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith("<<") and part.endswith(">>"):
+                # This is a calculator tool call.
+                inner = part[2:-2]  # Remove << >>
+                # Split on = to get expression and result.
+                if "=" in inner:
+                    expr, result = inner.rsplit("=", 1)
+                else:
+                    expr, result = inner, ""
+                assistant_message_parts.append({"type": "python", "text": expr})
+                assistant_message_parts.append({"type": "python_output", "text": result})
+            else:
+                assistant_message_parts.append({"type": "text", "text": part})
+        if not assistant_message_parts:
+            assistant_message_parts.append({"type": "text", "text": answer})
+        return assistant_message_parts
 
     @property
     def eval_type(self):
@@ -52,28 +107,17 @@ class GSM8K(Task):
     def get_example(self, index):
         """ Get a single problem from the dataset. """
         row = self.ds[index]
-        question = row['question'] # string of the question prompt
-        answer = row['answer'] # string of the full solution and the answer after #### marker
-        # Create and return the Conversation object
-        # This is tricky because GSM8K uses tool calls, which we need to parse here.
-        assistant_message_parts = []
-        parts = re.split(r'(<<[^>]+>>)', answer)
-        for part in parts:
-            if part.startswith('<<') and part.endswith('>>'):
-                # This is a calculator tool call
-                inner = part[2:-2]  # Remove << >>
-                # Split on = to get expression and result
-                if '=' in inner:
-                    expr, result = inner.rsplit('=', 1)
-                else:
-                    expr, result = inner, ""
-                # Add the tool call as a part
-                assistant_message_parts.append({"type": "python", "text": expr})
-                # Add the result as a part
-                assistant_message_parts.append({"type": "python_output", "text": result})
-            else:
-                # Regular text in between tool calls
-                assistant_message_parts.append({"type": "text", "text": part})
+        if self.dataset_name == "meta-math/MetaMathQA":
+            question = row["query"]
+            answer = row["response"]
+        elif self.dataset_name == "nvidia/OpenMathInstruct-2":
+            question = row["problem"]
+            answer = row["generated_solution"]
+        else:
+            question = row["question"]
+            answer = row["answer"]
+        # Create and return the Conversation object.
+        assistant_message_parts = self._answer_to_parts(answer)
         # Now put it all together
         messages = [
             {"role": "user", "content": question}, # note: simple string

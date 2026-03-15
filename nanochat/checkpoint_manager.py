@@ -26,6 +26,11 @@ def _patch_missing_config_keys(model_config_kwargs):
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
         log0(f"Patching missing window_pattern in model config to 'L'")
+    # Some older checkpoints saved a now-removed flag `use_rotary` in the model config.
+    # Newer versions of GPTConfig no longer accept this argument, so strip it out.
+    if "use_rotary" in model_config_kwargs:
+        model_config_kwargs.pop("use_rotary")
+        log0("Removing deprecated use_rotary from model config")
 
 def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
